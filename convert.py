@@ -25,32 +25,7 @@ from input_mapping import DELTA_TO_RETROARCH, GAME_TYPE_NAMES
 
 
 def parse_deltaskin(deltaskin_path):
-    """Extract and parse a deltaskin file or directory."""
-    deltaskin_path = Path(deltaskin_path)
-
-    # Check if it's a directory or has info.json adjacent (expanded deltaskin)
-    if deltaskin_path.is_dir():
-        skin_dir = deltaskin_path
-    elif deltaskin_path.suffix == '.deltaskin' and (deltaskin_path.parent / 'info.json').exists():
-        # Expanded deltaskin in source repo - info.json is in same directory
-        skin_dir = deltaskin_path.parent
-    else:
-        skin_dir = None
-
-    if skin_dir:
-        # Read from directory
-        info_path = skin_dir / 'info.json'
-        with open(info_path, 'r') as f:
-            info = json.load(f)
-
-        files = {}
-        for item in skin_dir.iterdir():
-            if item.name != 'info.json' and item.is_file():
-                files[item.name] = item.read_bytes()
-
-        return info, files
-
-    # Read from ZIP archive
+    """Extract and parse a deltaskin ZIP archive."""
     with zipfile.ZipFile(deltaskin_path, 'r') as zf:
         info_json = zf.read('info.json')
         info = json.loads(info_json)
@@ -69,8 +44,8 @@ def get_display_type_preference(device_data):
     for dtype in ['edgeToEdge', 'standard', 'splitView']:
         if dtype in device_data:
             return dtype
-    # Return first available
-    return next(iter(device_data.keys())) if device_data else None
+    # No known display type found
+    return None
 
 
 def convert_pdf_to_png(pdf_bytes, mapping_size, scale=3):
@@ -266,11 +241,15 @@ def convert_deltaskin(deltaskin_path, output_dir, devices=None, scale=3):
 
     skin_name = info.get('name', 'Unknown')
     game_type = info.get('gameTypeIdentifier', '')
-    game_name = GAME_TYPE_NAMES.get(game_type, game_type.split('.')[-1] if game_type else 'Unknown')
+    game_name = GAME_TYPE_NAMES.get(game_type, game_type.split('.')[-1] if game_type else '')
     representations = info.get('representations', {})
 
     # Clean skin name for filesystem
     safe_name = skin_name.replace(' ', '_').replace('/', '_')
+
+    # Avoid redundant naming like "Standard_NES_NES" if game name already in skin name
+    if game_name and game_name.upper() in skin_name.upper():
+        game_name = ''
 
     if devices is None:
         devices = list(representations.keys())
@@ -303,7 +282,11 @@ def convert_deltaskin(deltaskin_path, output_dir, devices=None, scale=3):
             continue
 
         # Create output directory
-        device_output_dir = Path(output_dir) / f"{safe_name}_{game_name}_{device}"
+        if game_name:
+            dir_name = f"{safe_name}_{game_name}_{device}"
+        else:
+            dir_name = f"{safe_name}_{device}"
+        device_output_dir = Path(output_dir) / dir_name
         device_output_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"  Device: {device} ({display_type})")
@@ -342,7 +325,7 @@ def convert_deltaskin(deltaskin_path, output_dir, devices=None, scale=3):
         config = generate_overlay_config(
             skin_name, device, orientations, portrait_data, landscape_data
         )
-        config_path = device_output_dir / f"{safe_name}_{game_name}_{device}.cfg"
+        config_path = device_output_dir / f"{dir_name}.cfg"
         config_path.write_text(config)
         print(f"    Config: {config_path}")
 
