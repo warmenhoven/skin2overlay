@@ -21,6 +21,11 @@ except ImportError:
     print("Install with: pip install pdf2image", file=sys.stderr)
     print("Also requires poppler: brew install poppler", file=sys.stderr)
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 from input_mapping import DELTA_TO_RETROARCH, GAME_TYPE_NAMES
 
 
@@ -49,15 +54,57 @@ def get_display_type_preference(device_data):
 
 
 def convert_pdf_to_png(pdf_bytes, mapping_size, scale=3):
-    """Convert PDF bytes to PNG image at the specified scale."""
+    """Convert PDF bytes to PNG image at mappingSize dimensions."""
     if convert_from_bytes is None:
         raise RuntimeError("pdf2image not installed")
 
     target_width = int(mapping_size['width'] * scale)
     target_height = int(mapping_size['height'] * scale)
 
-    images = convert_from_bytes(pdf_bytes, size=(target_width, target_height))
+    images = convert_from_bytes(pdf_bytes, size=(target_width, target_height), transparent=True)
     return images[0] if images else None
+
+
+def make_screen_transparent(img, screen_frames, mapping_size, scale=3):
+    """Make screen region(s) transparent in the overlay image."""
+    if Image is None or not screen_frames:
+        return img
+
+    # Convert to RGBA if needed
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
+
+    # Get image dimensions
+    img_width, img_height = img.size
+
+    # Create a new image with transparent screen areas
+    pixels = img.load()
+
+    for frame in screen_frames:
+        # Get frame coordinates (in mappingSize space)
+        fx = frame.get('x', 0)
+        fy = frame.get('y', 0)
+        fw = frame.get('width', 0)
+        fh = frame.get('height', 0)
+
+        # Scale to image coordinates
+        x1 = int(fx * scale)
+        y1 = int(fy * scale)
+        x2 = int((fx + fw) * scale)
+        y2 = int((fy + fh) * scale)
+
+        # Clamp to image bounds
+        x1 = max(0, min(x1, img_width))
+        y1 = max(0, min(y1, img_height))
+        x2 = max(0, min(x2, img_width))
+        y2 = max(0, min(y2, img_height))
+
+        # Make this region transparent
+        for y in range(y1, y2):
+            for x in range(x1, x2):
+                pixels[x, y] = (0, 0, 0, 0)
+
+    return img
 
 
 def compute_bounding_box(frames):
@@ -156,11 +203,9 @@ def generate_overlay_config(skin_name, device, orientations, portrait_data, land
     for orientation in orientations:
         if orientation == 'portrait' and portrait_data:
             data = portrait_data
-            aspect_ratio = data['mappingSize']['height'] / data['mappingSize']['width']
             img_name = 'portrait.png'
         elif orientation == 'landscape' and landscape_data:
             data = landscape_data
-            aspect_ratio = data['mappingSize']['width'] / data['mappingSize']['height']
             img_name = 'landscape.png'
         else:
             continue
@@ -168,18 +213,18 @@ def generate_overlay_config(skin_name, device, orientations, portrait_data, land
         mapping_size = data['mappingSize']
         items = data.get('items', [])
 
-        # Get screen frame(s) for viewport
+        # Get screen frame(s) for viewport (used for landscape)
         screen_frames = data.get('screens', [])
         if not screen_frames:
-            # Fallback to single gameScreenFrame
             gsf = data.get('gameScreenFrame')
             if gsf:
                 screen_frames = [{'outputFrame': gsf}]
 
         # Compute viewport from screen frames
+        viewport = None
         if screen_frames:
             frames = [s.get('outputFrame', s.get('inputFrame', {})) for s in screen_frames if s]
-            frames = [f for f in frames if f]  # Filter out empty
+            frames = [f for f in frames if f]
             if frames:
                 viewport = compute_bounding_box(frames)
             else:
@@ -190,17 +235,43 @@ def generate_overlay_config(skin_name, device, orientations, portrait_data, land
         # Overlay header
         lines.append(f'overlay{overlay_index}_name = "{orientation}"')
         lines.append(f'overlay{overlay_index}_overlay = "{img_name}"')
-        lines.append(f'overlay{overlay_index}_full_screen = true')
         lines.append(f'overlay{overlay_index}_normalized = true')
-        lines.append(f'overlay{overlay_index}_aspect_ratio = {aspect_ratio:.6f}')
 
-        # Viewport
-        if viewport:
-            vp_x = viewport['x'] / mapping_size['width']
-            vp_y = viewport['y'] / mapping_size['height']
-            vp_w = viewport['width'] / mapping_size['width']
-            vp_h = viewport['height'] / mapping_size['height']
-            lines.append(f'overlay{overlay_index}_viewport = "{vp_x:.6f},{vp_y:.6f},{vp_w:.6f},{vp_h:.6f}"')
+        # Typical edge-to-edge iPhone aspect ratio (19.5:9)
+        screen_aspect = 2.167
+
+        if orientation == 'portrait':
+            # Portrait mode: use overlay_rect to position controller at bottom
+            # Controller aspect ratio determines what fraction of screen height it needs
+            controller_aspect = mapping_size['height'] / mapping_size['width']
+            controller_height_ratio = controller_aspect / screen_aspect
+            controller_y = 1.0 - controller_height_ratio
+
+            # full_screen = true so overlay is positioned on physical screen
+            lines.append(f'overlay{overlay_index}_full_screen = true')
+
+            # Set aspect_ratio to match display to prevent auto_scale from shrinking overlay
+            # iOS defaults auto_scale=true and "portrait" overlays get 0.5625 (9:16)
+            # but actual display is ~0.46, causing y_scale=0.88. Match display to get 1.0.
+            display_aspect_ratio = 1.0 / screen_aspect
+            lines.append(f'overlay{overlay_index}_aspect_ratio = {display_aspect_ratio:.6f}')
+
+            # Position overlay at bottom of screen
+            lines.append(f'overlay{overlay_index}_rect = "0.0,{controller_y:.6f},1.0,{controller_height_ratio:.6f}"')
+
+            # Viewport for game = top portion of screen
+            lines.append(f'overlay{overlay_index}_viewport = "0.0,0.0,1.0,{controller_y:.6f}"')
+        else:
+            # Landscape mode: full screen, use viewport from gameScreenFrame
+            lines.append(f'overlay{overlay_index}_full_screen = true')
+            # Set aspect_ratio to match display to prevent auto_scale from shrinking width
+            lines.append(f'overlay{overlay_index}_aspect_ratio = {screen_aspect:.6f}')
+            if viewport:
+                vp_x = viewport['x'] / mapping_size['width']
+                vp_y = viewport['y'] / mapping_size['height']
+                vp_w = viewport['width'] / mapping_size['width']
+                vp_h = viewport['height'] / mapping_size['height']
+                lines.append(f'overlay{overlay_index}_viewport = "{vp_x:.6f},{vp_y:.6f},{vp_w:.6f},{vp_h:.6f}"')
 
         lines.append('')
 
@@ -305,11 +376,21 @@ def convert_deltaskin(deltaskin_path, output_dir, devices=None, scale=3):
                 mapping_size = data['mappingSize']
                 asset_bytes = files[asset_name]
 
+                # Get screen frames for transparency
+                screen_frames = data.get('screens', [])
+                if not screen_frames:
+                    gsf = data.get('gameScreenFrame')
+                    if gsf:
+                        screen_frames = [gsf]
+
                 if asset_name.endswith('.pdf'):
                     print(f"    Converting {orientation} PDF to PNG...")
                     try:
                         img = convert_pdf_to_png(asset_bytes, mapping_size, scale)
                         if img:
+                            # Make screen area(s) transparent
+                            if screen_frames:
+                                img = make_screen_transparent(img, screen_frames, mapping_size, scale)
                             img_path = device_output_dir / f'{orientation}.png'
                             img.save(str(img_path), 'PNG')
                             print(f"      Saved: {img_path}")
