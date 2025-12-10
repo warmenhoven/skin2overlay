@@ -118,7 +118,7 @@
     <p class="subtitle">Convert .deltaskin files to RetroArch overlays</p>
 
     <div class="drop-zone" id="dropZone">
-        <input type="file" id="fileInput" accept=".deltaskin,.zip">
+        <input type="file" id="fileInput" accept=".deltaskin,.zip,application/zip,application/octet-stream,*/*">
         <p>Drop .deltaskin file here<br>or click to browse</p>
         <p class="filename" id="filename"></p>
     </div>
@@ -255,7 +255,8 @@ async function convertPdfToCanvas(pdfBytes, mappingSize, scale) {
     const scaleX = targetWidth / pdfViewport.width;
     const viewport = page.getViewport({ scale: scaleX });
 
-    await page.render({ canvasContext: ctx, viewport }).promise;
+    // Render with transparent background (don't fill with white)
+    await page.render({ canvasContext: ctx, viewport, background: 'rgba(0,0,0,0)' }).promise;
     return canvas;
 }
 

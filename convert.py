@@ -61,7 +61,7 @@ def convert_pdf_to_png(pdf_bytes, mapping_size, scale=3):
     target_width = int(mapping_size['width'] * scale)
     target_height = int(mapping_size['height'] * scale)
 
-    images = convert_from_bytes(pdf_bytes, size=(target_width, target_height), transparent=True)
+    images = convert_from_bytes(pdf_bytes, size=(target_width, target_height), transparent=True, use_pdftocairo=True)
     return images[0] if images else None
 
 
