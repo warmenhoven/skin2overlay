@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delta Skin to RetroArch Overlay Converter</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        h1 {
+            text-align: center;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 24px;
+        }
+        .drop-zone {
+            border: 2px dashed #444;
+            border-radius: 12px;
+            padding: 48px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #252542;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: #6c63ff;
+            background: #2a2a4a;
+        }
+        .drop-zone.has-file {
+            border-color: #4caf50;
+            background: #1e3a1e;
+        }
+        .drop-zone input { display: none; }
+        .drop-zone p { margin: 0; color: #aaa; }
+        .drop-zone .filename {
+            color: #4caf50;
+            font-weight: bold;
+            margin-top: 8px;
+        }
+        .options {
+            display: flex;
+            gap: 24px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .option-group label {
+            display: block;
+            color: #888;
+            font-size: 12px;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+        }
+        .checkboxes { display: flex; gap: 12px; }
+        .checkboxes label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            color: #ccc;
+        }
+        select {
+            background: #333;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 6px 12px;
+            border-radius: 4px;
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: #6c63ff;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover:not(:disabled) { background: #5a52d5; }
+        button:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+        .log {
+            background: #0d0d1a;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 20px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            color: #8f8;
+        }
+        .log:empty { display: none; }
+        .log .error { color: #f88; }
+        .log .info { color: #88f; }
+    </style>
+</head>
+<body>
+    <h1>Delta Skin Converter</h1>
+    <p class="subtitle">Convert .deltaskin files to RetroArch overlays</p>
+
+    <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" accept=".deltaskin,.zip">
+        <p>Drop .deltaskin file here<br>or click to browse</p>
+        <p class="filename" id="filename"></p>
+    </div>
+
+    <div class="options">
+        <div class="option-group">
+            <label>Devices</label>
+            <div class="checkboxes">
+                <label><input type="checkbox" id="devIphone" checked> iPhone</label>
+                <label><input type="checkbox" id="devIpad" checked> iPad</label>
+                <label><input type="checkbox" id="devTv"> TV</label>
+            </div>
+        </div>
+        <div class="option-group">
+            <label>Scale</label>
+            <select id="scale">
+                <option value="1">1x</option>
+                <option value="2">2x</option>
+                <option value="3" selected>3x (Retina)</option>
+            </select>
+        </div>
+    </div>
+
+    <button id="convertBtn" disabled>Convert & Download</button>
+
+    <div class="log" id="log"></div>
+
+    <script>
+// Input mapping data
+const DELTA_TO_RETROARCH = {
+    'a': 'a', 'b': 'b', 'x': 'x', 'y': 'y',
+    'l': 'l', 'r': 'r',
+    'start': 'start', 'select': 'select', 'menu': 'menu_toggle',
+    // N64 specific
+    'z': 'l2',
+    'cUp': 'r_y_minus', 'cDown': 'r_y_plus',
+    'cLeft': 'r_x_minus', 'cRight': 'r_x_plus',
+    // D-pad
+    'up': 'up', 'down': 'down', 'left': 'left', 'right': 'right',
+    // Analog stick
+    'analogStickUp': 'l_y_minus', 'analogStickDown': 'l_y_plus',
+    'analogStickLeft': 'l_x_minus', 'analogStickRight': 'l_x_plus',
+    // DS touch (not convertible)
+    'touchScreenX': null, 'touchScreenY': null
+};
+
+const GAME_TYPE_NAMES = {
+    'com.rileytestut.delta.game.nes': 'NES',
+    'com.rileytestut.delta.game.snes': 'SNES',
+    'com.rileytestut.delta.game.n64': 'N64',
+    'com.rileytestut.delta.game.gbc': 'GBC',
+    'com.rileytestut.delta.game.gba': 'GBA',
+    'com.rileytestut.delta.game.ds': 'DS',
+    'com.rileytestut.delta.game.genesis': 'Genesis'
+};
+
+// Configure pdf.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// State
+let selectedFile = null;
+
+// DOM elements
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const filenameEl = document.getElementById('filename');
+const convertBtn = document.getElementById('convertBtn');
+const logEl = document.getElementById('log');
+
+// File handling
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+
+function handleFile(file) {
+    selectedFile = file;
+    filenameEl.textContent = file.name;
+    dropZone.classList.add('has-file');
+    convertBtn.disabled = false;
+    logEl.innerHTML = '';
+}
+
+function log(msg, type = '') {
+    const span = document.createElement('span');
+    span.className = type;
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Parse deltaskin ZIP
+async function parseDeltaskin(arrayBuffer) {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const infoJson = await zip.file('info.json').async('string');
+    const info = JSON.parse(infoJson);
+
+    const files = {};
+    for (const [name, file] of Object.entries(zip.files)) {
+        if (name !== 'info.json' && !file.dir) {
+            files[name] = await file.async('arraybuffer');
+        }
+    }
+    return { info, files };
+}
+
+// Get preferred display type
+function getDisplayTypePreference(deviceData) {
+    for (const dtype of ['edgeToEdge', 'standard', 'splitView']) {
+        if (deviceData[dtype]) return dtype;
+    }
+    return null;
+}
+
+// Convert PDF to canvas
+async function convertPdfToCanvas(pdfBytes, mappingSize, scale) {
+    const pdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+    const page = await pdf.getPage(1);
+
+    const targetWidth = Math.round(mappingSize.width * scale);
+    const targetHeight = Math.round(mappingSize.height * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+
+    const ctx = canvas.getContext('2d');
+    const pdfViewport = page.getViewport({ scale: 1 });
+    const scaleX = targetWidth / pdfViewport.width;
+    const viewport = page.getViewport({ scale: scaleX });
+
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return canvas;
+}
+
+// Make screen regions transparent
+function makeScreenTransparent(canvas, screenFrames, mappingSize, scale) {
+    if (!screenFrames || screenFrames.length === 0) return canvas;
+
+    const ctx = canvas.getContext('2d');
+    for (const frame of screenFrames) {
+        const x = Math.round(frame.x * scale);
+        const y = Math.round(frame.y * scale);
+        const w = Math.round(frame.width * scale);
+        const h = Math.round(frame.height * scale);
+        ctx.clearRect(x, y, w, h);
+    }
+    return canvas;
+}
+
+// Canvas to PNG blob
+function canvasToBlob(canvas) {
+    return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+// Compute bounding box of multiple frames (for DS dual screens)
+function computeBoundingBox(frames) {
+    if (!frames || frames.length === 0) return null;
+    const minX = Math.min(...frames.map(f => f.x));
+    const minY = Math.min(...frames.map(f => f.y));
+    const maxX = Math.max(...frames.map(f => f.x + f.width));
+    const maxY = Math.max(...frames.map(f => f.y + f.height));
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+// Normalize frame to 0-1 coordinates (center + half-size)
+function normalizeFrame(frame, mappingSize) {
+    const x = (frame.x + frame.width / 2) / mappingSize.width;
+    const y = (frame.y + frame.height / 2) / mappingSize.height;
+    const w = (frame.width / 2) / mappingSize.width;
+    const h = (frame.height / 2) / mappingSize.height;
+    return { x, y, w, h };
+}
+
+// Check if inputs represent a d-pad
+function isDpad(inputs) {
+    if (typeof inputs !== 'object' || Array.isArray(inputs)) return false;
+    return ['up', 'down', 'left', 'right'].every(k => k in inputs);
+}
+
+// Check if inputs represent an analog stick
+function isAnalogStick(inputs) {
+    if (typeof inputs !== 'object' || Array.isArray(inputs)) return false;
+    const analogValues = ['analogStickUp', 'analogStickDown', 'analogStickLeft', 'analogStickRight'];
+    return Object.values(inputs).some(v => analogValues.includes(v));
+}
+
+// Convert item to RetroArch descriptor
+function convertItemToDescriptor(item, mappingSize, index, overlayIndex) {
+    const frame = item.frame;
+    const inputs = item.inputs;
+    if (!frame || !inputs) return [];
+
+    const { x, y, w, h } = normalizeFrame(frame, mappingSize);
+    const prefix = `overlay${overlayIndex}_desc${index}`;
+    const lines = [];
+
+    if (Array.isArray(inputs) && inputs.length > 0) {
+        const raInput = DELTA_TO_RETROARCH[inputs[0]] || inputs[0];
+        if (raInput) {
+            lines.push(`${prefix} = "${raInput},${x.toFixed(6)},${y.toFixed(6)},radial,${w.toFixed(6)},${h.toFixed(6)}"`);
+        }
+    } else if (typeof inputs === 'object') {
+        if (isAnalogStick(inputs)) {
+            lines.push(`${prefix} = "analog_left,${x.toFixed(6)},${y.toFixed(6)},radial,${w.toFixed(6)},${h.toFixed(6)}"`);
+        } else if (isDpad(inputs)) {
+            lines.push(`${prefix} = "dpad_area,${x.toFixed(6)},${y.toFixed(6)},rect,${w.toFixed(6)},${h.toFixed(6)}"`);
+        }
+    }
+
+    // Extended edges
+    const ext = item.extendedEdges || {};
+    if (ext.top) lines.push(`${prefix}_reach_up = ${(1 + ext.top / (frame.height / 2)).toFixed(2)}`);
+    if (ext.bottom) lines.push(`${prefix}_reach_down = ${(1 + ext.bottom / (frame.height / 2)).toFixed(2)}`);
+    if (ext.left) lines.push(`${prefix}_reach_left = ${(1 + ext.left / (frame.width / 2)).toFixed(2)}`);
+    if (ext.right) lines.push(`${prefix}_reach_right = ${(1 + ext.right / (frame.width / 2)).toFixed(2)}`);
+
+    return lines;
+}
+
+// Generate overlay config for a device
+function generateOverlayConfig(skinName, device, orientations, portraitData, landscapeData) {
+    const lines = [];
+    const numOverlays = orientations.length;
+    lines.push(`overlays = ${numOverlays}`);
+    lines.push('');
+
+    let overlayIndex = 0;
+    const screenAspect = 2.167; // edge-to-edge iPhone
+
+    for (const orientation of orientations) {
+        const data = orientation === 'portrait' ? portraitData : landscapeData;
+        if (!data) continue;
+
+        const mappingSize = data.mappingSize;
+        const items = data.items || [];
+        const imgName = `${orientation}.png`;
+
+        // Get screen frames for viewport
+        let screenFrames = data.screens || [];
+        if (screenFrames.length === 0 && data.gameScreenFrame) {
+            screenFrames = [{ outputFrame: data.gameScreenFrame }];
+        }
+
+        // Compute viewport from screen frames
+        let viewport = null;
+        if (screenFrames.length > 0) {
+            const frames = screenFrames.map(s => s.outputFrame || s.inputFrame || s).filter(f => f && f.width);
+            if (frames.length > 0) {
+                viewport = computeBoundingBox(frames);
+            }
+        }
+        if (!viewport) viewport = data.gameScreenFrame;
+
+        // Overlay header
+        lines.push(`overlay${overlayIndex}_name = "${orientation}"`);
+        lines.push(`overlay${overlayIndex}_overlay = "${imgName}"`);
+        lines.push(`overlay${overlayIndex}_normalized = true`);
+
+        if (orientation === 'portrait') {
+            const controllerAspect = mappingSize.height / mappingSize.width;
+            const controllerHeightRatio = controllerAspect / screenAspect;
+            const controllerY = 1.0 - controllerHeightRatio;
+            const displayAspectRatio = 1.0 / screenAspect;
+
+            lines.push(`overlay${overlayIndex}_full_screen = true`);
+            lines.push(`overlay${overlayIndex}_aspect_ratio = ${displayAspectRatio.toFixed(6)}`);
+            lines.push(`overlay${overlayIndex}_rect = "0.0,${controllerY.toFixed(6)},1.0,${controllerHeightRatio.toFixed(6)}"`);
+            lines.push(`overlay${overlayIndex}_viewport = "0.0,0.0,1.0,${controllerY.toFixed(6)}"`);
+        } else {
+            lines.push(`overlay${overlayIndex}_full_screen = true`);
+            lines.push(`overlay${overlayIndex}_aspect_ratio = ${screenAspect.toFixed(6)}`);
+            if (viewport) {
+                const vpX = viewport.x / mappingSize.width;
+                const vpY = viewport.y / mappingSize.height;
+                const vpW = viewport.width / mappingSize.width;
+                const vpH = viewport.height / mappingSize.height;
+                lines.push(`overlay${overlayIndex}_viewport = "${vpX.toFixed(6)},${vpY.toFixed(6)},${vpW.toFixed(6)},${vpH.toFixed(6)}"`);
+            }
+        }
+        lines.push('');
+
+        // Convert items to descriptors
+        const descLines = [];
+        for (let i = 0; i < items.length; i++) {
+            descLines.push(...convertItemToDescriptor(items[i], mappingSize, i, overlayIndex));
+        }
+
+        // Add rotation button if multiple orientations
+        const otherOrientation = orientation === 'portrait' ? 'landscape' : 'portrait';
+        if (numOverlays > 1) {
+            const rotateIdx = items.length;
+            if (orientation === 'portrait') {
+                descLines.push(`overlay${overlayIndex}_desc${rotateIdx} = "overlay_next,0.5,0.02,radial,0.04,0.02"`);
+            } else {
+                descLines.push(`overlay${overlayIndex}_desc${rotateIdx} = "overlay_next,0.5,0.04,radial,0.02,0.04"`);
+            }
+            descLines.push(`overlay${overlayIndex}_desc${rotateIdx}_next_target = "${otherOrientation}"`);
+        }
+
+        const numDescs = numOverlays > 1 ? items.length + 1 : items.length;
+        lines.push(`overlay${overlayIndex}_descs = ${numDescs}`);
+        lines.push('');
+        lines.push(...descLines);
+        lines.push('');
+
+        overlayIndex++;
+    }
+
+    return lines.join('\n');
+}
+
+// Get screen frames for transparency
+function getScreenFrames(data) {
+    const frames = [];
+    if (data.screens && data.screens.length > 0) {
+        for (const s of data.screens) {
+            const f = s.outputFrame || s;
+            if (f && f.width) frames.push(f);
+        }
+    } else if (data.gameScreenFrame) {
+        frames.push(data.gameScreenFrame);
+    }
+    return frames;
+}
+
+// Get asset name from assets dict (prefer resizable/PDF, then medium, large, small)
+function getAssetName(assets) {
+    return assets.resizable || assets.medium || assets.large || assets.small;
+}
+
+// Main conversion function
+async function convertDeltaskin(arrayBuffer, devices, scale) {
+    log('Parsing deltaskin...', 'info');
+    const { info, files } = await parseDeltaskin(arrayBuffer);
+
+    const skinName = info.name || 'Unknown';
+    const gameType = info.gameTypeIdentifier || '';
+    let gameName = GAME_TYPE_NAMES[gameType] || (gameType ? gameType.split('.').pop() : '');
+
+    // Avoid redundant naming
+    if (gameName && skinName.toUpperCase().includes(gameName.toUpperCase())) {
+        gameName = '';
+    }
+
+    const safeName = skinName.replace(/[ /]/g, '_');
+    const representations = info.representations || {};
+    const results = [];
+
+    for (const device of devices) {
+        if (!representations[device]) {
+            log(`  Skipping ${device}: not in skin`);
+            continue;
+        }
+
+        const deviceData = representations[device];
+        const displayType = getDisplayTypePreference(deviceData);
+        if (!displayType) {
+            log(`  Skipping ${device}: no display types`);
+            continue;
+        }
+
+        const typeData = deviceData[displayType];
+        const portraitData = typeData.portrait;
+        const landscapeData = typeData.landscape;
+
+        const orientations = [];
+        if (portraitData) orientations.push('portrait');
+        if (landscapeData) orientations.push('landscape');
+
+        if (orientations.length === 0) {
+            log(`  Skipping ${device}: no orientations`);
+            continue;
+        }
+
+        const dirName = gameName ? `${safeName}_${gameName}_${device}` : `${safeName}_${device}`;
+        log(`  Device: ${device} (${displayType})`);
+        log(`    Orientations: ${orientations.join(', ')}`);
+
+        const result = { dirName, config: null, portraitPng: null, landscapePng: null };
+
+        // Convert images
+        for (const orientation of orientations) {
+            const data = orientation === 'portrait' ? portraitData : landscapeData;
+            const assets = data.assets || {};
+            const assetName = getAssetName(assets);
+
+            if (assetName && files[assetName]) {
+                const mappingSize = data.mappingSize;
+                const screenFrames = getScreenFrames(data);
+
+                try {
+                    let canvas;
+                    if (assetName.toLowerCase().endsWith('.pdf')) {
+                        log(`    Converting ${orientation} PDF...`);
+                        canvas = await convertPdfToCanvas(files[assetName], mappingSize, scale);
+                    } else {
+                        // PNG: create canvas from image
+                        log(`    Loading ${orientation} PNG...`);
+                        const blob = new Blob([files[assetName]], { type: 'image/png' });
+                        const img = await createImageBitmap(blob);
+                        canvas = document.createElement('canvas');
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        canvas.getContext('2d').drawImage(img, 0, 0);
+                    }
+
+                    // Make screen transparent
+                    if (screenFrames.length > 0) {
+                        const imgScale = canvas.width / mappingSize.width;
+                        makeScreenTransparent(canvas, screenFrames, mappingSize, imgScale);
+                    }
+
+                    const blob = await canvasToBlob(canvas);
+                    if (orientation === 'portrait') result.portraitPng = blob;
+                    else result.landscapePng = blob;
+                    log(`      Converted ${orientation}.png`);
+                } catch (err) {
+                    log(`      Error converting ${orientation}: ${err.message}`, 'error');
+                }
+            }
+        }
+
+        // Generate config
+        result.config = generateOverlayConfig(skinName, device, orientations, portraitData, landscapeData);
+        log(`    Generated ${dirName}.cfg`);
+        results.push(result);
+    }
+
+    return results;
+}
+
+// Create output ZIP
+async function createOutputZip(results) {
+    const zip = new JSZip();
+    for (const r of results) {
+        const folder = zip.folder(r.dirName);
+        folder.file(`${r.dirName}.cfg`, r.config);
+        if (r.portraitPng) folder.file('portrait.png', r.portraitPng);
+        if (r.landscapePng) folder.file('landscape.png', r.landscapePng);
+    }
+    return zip.generateAsync({ type: 'blob' });
+}
+
+// Convert button click handler
+convertBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    const devices = [];
+    if (document.getElementById('devIphone').checked) devices.push('iphone');
+    if (document.getElementById('devIpad').checked) devices.push('ipad');
+    if (document.getElementById('devTv').checked) devices.push('tv');
+
+    if (devices.length === 0) {
+        log('Please select at least one device', 'error');
+        return;
+    }
+
+    const scale = parseInt(document.getElementById('scale').value);
+
+    convertBtn.disabled = true;
+    logEl.innerHTML = '';
+
+    try {
+        log(`Converting: ${selectedFile.name}`, 'info');
+        const arrayBuffer = await selectedFile.arrayBuffer();
+        const results = await convertDeltaskin(arrayBuffer, devices, scale);
+
+        if (results.length === 0) {
+            log('No overlays generated', 'error');
+            return;
+        }
+
+        log('Creating ZIP...', 'info');
+        const zipBlob = await createOutputZip(results);
+
+        // Trigger download
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = selectedFile.name.replace(/\.(deltaskin|zip)$/i, '') + '_retroarch.zip';
+        a.click();
+        URL.revokeObjectURL(url);
+
+        log('Done! Download started.', 'info');
+    } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+        console.error(err);
+    } finally {
+        convertBtn.disabled = false;
+    }
+});
+    </script>
+</body>
+</html>

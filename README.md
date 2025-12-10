@@ -2,34 +2,52 @@
 
 Convert Delta emulator touch controller skins (`.deltaskin` files) to RetroArch overlay `.cfg` files with PNG assets.
 
-## Requirements
+## Web Version (Recommended)
+
+Use the web converter directly in your browser - no installation required:
+
+**[Open Web Converter](https://warmenhoven.github.io/skin2overlay/)** *(update URL after deploying)*
+
+Or run locally:
+```bash
+# Open index.html in your browser
+open index.html
+```
+
+The web version runs entirely in your browser - your files never leave your device.
+
+---
+
+## Command Line Version
+
+### Requirements
 
 - Python 3.8+
 - [Poppler](https://poppler.freedesktop.org/) (for PDF to PNG conversion)
 
-### macOS
+#### macOS
 
 ```bash
 brew install poppler
 ```
 
-### Linux
+#### Linux
 
 ```bash
 sudo apt install poppler-utils  # Debian/Ubuntu
 ```
 
-## Installation
+### Installation
 
 ```bash
-git clone https://github.com/user/deltaskin-converter.git
-cd deltaskin-converter
+git clone https://github.com/warmenhoven/skin2overlay.git
+cd skin2overlay
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+### Usage
 
 ```bash
 # Activate virtual environment
